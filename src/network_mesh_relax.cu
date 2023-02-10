@@ -219,7 +219,7 @@ bool read_network_mesh(string file_name, double &offset, vector<double> &points,
 
     //Find pairs of duplicate points along the left and right edges that should
     //be subject to the same forces.
-    for(auto iter = pmap.begin(); iter->first.x < min_x + FLT_TOL && iter != pmap.end(); iter ++){
+    for(auto iter = pmap.begin(); iter != pmap.end() && iter->first.x < min_x + FLT_TOL; iter ++){
         if(pmap.find(Point(iter->first.x+offset, iter->first.y)) != pmap.end()){
             mesh_pairs.push_back(iter->second);
 	    mesh_pairs.push_back(pmap[Point(iter->first.x+offset,iter->first.y)]);
@@ -722,7 +722,7 @@ __global__ void gel_forces(double smod, double bmod, double dilation, int nelems
 
     det = f11*f22 - f12*f21;
     coeff1 = -smod*areas[fIdx] / det;
-    coeff2 = bmod * (1 + dilation - det) + smod*(f11*f11+f12*f12+f21*f21+f22*f22)/(2*det*det);
+    coeff2 = bmod * (dilation + 1 - det) + smod*(f11*f11+f12*f12+f21*f21+f22*f22)/(2*det*det);
     coeff2 *= areas[fIdx];
 
     du_df11 = f11*coeff1 + f22*coeff2;
@@ -900,24 +900,17 @@ bool run_fire_md(int num_dof, int npairs, int ntriples, int nelems, double width
         cudaDeviceSynchronize();
     }
 
-    cublasDnrm2(handle, num_dof, d_forces, 1, &fmag);
-    cudaDeviceSynchronize();
-
     if(kb > 0){
         bending_forces<<<t_grid, block>>>(kb, ntriples, width, d_pos, d_fcodes, d_triples, d_t_offsets, d_forces);
         cudaDeviceSynchronize();
     }
 
-    cublasDnrm2(handle, num_dof, d_forces, 1, &fmag);
-    cudaDeviceSynchronize();
-
     if(bmod > 0){
         gel_forces<<<m_grid, block>>>(smod, bmod, dilation, nelems, d_pos, d_elems, d_inv_mats, d_areas, d_fcodes, d_forces);
+        cudaDeviceSynchronize();
         duplicate_forces<<<mp_grid, block>>>(d_fcodes, d_forces, d_mpairs, n_mpairs);
+        cudaDeviceSynchronize();
     }
-
-    cublasDnrm2(handle, num_dof, d_forces, 1, &fmag);
-    cudaDeviceSynchronize();
 
     //cublasDnrm2(handle, num_dof, d_vel, 1, &vmag);
     vmag = 0;
@@ -958,7 +951,9 @@ bool run_fire_md(int num_dof, int npairs, int ntriples, int nelems, double width
 
 	if(bmod > 0){
             gel_forces<<<m_grid, block>>>(smod, bmod, dilation, nelems, d_pos, d_elems, d_inv_mats, d_areas, d_fcodes, d_forces);
+            cudaDeviceSynchronize();
             duplicate_forces<<<mp_grid, block>>>(d_fcodes, d_forces, d_mpairs, n_mpairs);
+            cudaDeviceSynchronize();
         }
 
         //Update velocities and calculate power
@@ -1236,7 +1231,7 @@ void do_relaxation_run(string net_file, string log_name, string edata_name, stri
     //FEM mesh information
     cudaMemcpy(d_triangles,&triangles[0],sizeof(int)*triangles.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_areas,&areas[0],sizeof(double)*areas.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mpairs,&mesh_pairs[0],sizeof(double)*mesh_pairs.size(), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mpairs,&mesh_pairs[0],sizeof(int)*mesh_pairs.size(), cudaMemcpyHostToDevice);
 
 
     //Set dimensions of grids
@@ -1277,6 +1272,7 @@ void do_relaxation_run(string net_file, string log_name, string edata_name, stri
     else net_bmod = 0;
 
     pref_d = dilation * (bmod + net_bmod) / bmod;
+    cout << "Preferred dilation: " << pref_d << "\n";
 
     //Apply a set of compression steps, followed by a set of shear steps. Start
     //from an affine guess, then relax about this guess to a minimum energy 
